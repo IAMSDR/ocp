@@ -2,8 +2,7 @@
  * Library API for @iamsdr/ocp.
  *
  * The plugin entry (`@iamsdr/ocp`) intentionally exports only the plugin
- * function so OpenCode's legacy plugin loader — which iterates every module
- * export and rejects non-functions — can load it. Import reusable helpers from
+ * definition required by OpenCode. Import reusable helpers from
  * `@iamsdr/ocp/lib` instead.
  */
 export * from "./config/registry.js";

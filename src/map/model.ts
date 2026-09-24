@@ -1,3 +1,5 @@
+import { Model, Provider } from "@opencode/plugin";
+
 import type { RawModel } from "../fetch/models.js";
 import { normalizeCapabilities, normalizeLimits, type NormalizedCapabilities, type NormalizedLimits } from "./capabilities.js";
 import { extractCost, type NormalizedCost } from "./cost.js";
@@ -38,6 +40,7 @@ export interface ModelV2Entry {
 
 export const OPENAI_COMPATIBLE_NPM = "@ai-sdk/openai-compatible";
 export const OPENAI_COMPATIBLE_API_ID = "openai-compatible";
+export const OPENAI_COMPATIBLE_PACKAGE_V2 = "@opencode/ai/providers/openai-compatible";
 
 function modalityArray(
   caps: { text: boolean; audio: boolean; image: boolean; video: boolean; pdf: boolean },
@@ -138,6 +141,82 @@ export function mapToModelV2(raw: RawModel, ctx: { providerID: string; baseURL: 
     headers: {},
     release_date: release,
   };
+}
+
+/**
+ * Map a raw `/v1/models` entry to the V2 `Model.Info` shape used by
+ * `ctx.provider.transform` (opencode >=2.0).
+ *
+ * Keeps the same capability/limit/cost heuristics as the legacy mappers
+ * but emits the flat `capabilities: { tools, input, output }` and
+ * array-cost shape required by `@opencode/schema`.
+ */
+export function mapToModelInfo(
+  raw: RawModel,
+  ctx: { providerID: string },
+): Model.Info {
+  const caps = normalizeCapabilities(raw);
+  const limits = normalizeLimits(raw);
+  const cost = extractCost(raw);
+  const name = displayName(raw);
+  const providerID = Provider.ID.make(ctx.providerID);
+  const modelID = Model.ID.make(raw.id);
+
+  const input: string[] = [];
+  if (caps.input.text) input.push("text");
+  if (caps.input.image) input.push("image");
+  if (caps.input.audio) input.push("audio");
+  if (caps.input.video) input.push("video");
+  if (caps.input.pdf) input.push("pdf");
+  if (input.length === 0) input.push("text");
+
+  const output: string[] = [];
+  if (caps.output.text) output.push("text");
+  if (caps.output.image) output.push("image");
+  if (caps.output.audio) output.push("audio");
+  if (caps.output.video) output.push("video");
+  if (caps.output.pdf) output.push("pdf");
+  if (output.length === 0) output.push("text");
+
+  // Time: try to preserve unix ms, fallback 0
+  const rawTime = raw.created ?? raw.created_at ?? raw.release_date ?? raw.releaseDate;
+  let released = 0;
+  if (typeof rawTime === "number" && Number.isFinite(rawTime) && rawTime > 0) {
+    released = rawTime > 1e12 ? rawTime : rawTime * 1000;
+  } else if (typeof rawTime === "string" && rawTime.length > 0) {
+    const parsed = Date.parse(rawTime);
+    if (Number.isFinite(parsed)) released = parsed;
+  }
+
+  const costArray = cost
+    ? [
+        {
+          input: cost.input,
+          output: cost.output,
+          cache: { read: cost.cache.read ?? 0, write: cost.cache.write ?? 0 },
+        },
+      ]
+    : [];
+
+  return {
+    ...Model.Info.default(providerID, modelID),
+    name,
+    ...(typeof raw.family === "string" ? { family: Model.Family.make(raw.family) } : {}),
+    capabilities: {
+      tools: caps.toolcall,
+      input,
+      output,
+    },
+    limit: {
+      context: limits.context,
+      output: limits.output,
+    },
+    cost: costArray,
+    status: "active",
+    enabled: true,
+    variants: [],
+    time: { released },
+  } as unknown as Model.Info;
 }
 
 export { asRecord } from "./util.js";

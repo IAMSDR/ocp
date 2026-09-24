@@ -27,8 +27,8 @@ function consoleLogger(): Logger {
 export const defaultLogger: Logger = consoleLogger();
 
 /**
- * Build a logger that routes through OpenCode's structured app logger when the
- * SDK client is available, falling back to the console otherwise.
+ * Build a logger that routes through an OpenCode structured app logger when
+ * available, falling back to the console otherwise.
  */
 export function createLogger(
   client?: {

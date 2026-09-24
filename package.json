@@ -1,13 +1,13 @@
 {
   "name": "@iamsdr/ocp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Simple OpenCode plugin that connects any OpenAI-compatible /v1 endpoint and auto-loads its models.",
   "type": "module",
   "license": "MIT",
   "author": "IAMSDR",
   "repository": {
     "type": "git",
-    "url": "https://github.com/IAMSDR/ocp.git"
+    "url": "git+https://github.com/IAMSDR/ocp.git"
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -41,13 +41,10 @@
     "prepare": "tsc"
   },
   "dependencies": {
+    "@opencode/plugin": "^2.0.15",
     "prompts": "^2.4.2"
   },
-  "peerDependencies": {
-    "@opencode-ai/plugin": ">=1.18.0"
-  },
   "devDependencies": {
-    "@opencode-ai/plugin": "^1.18.25",
     "@types/node": "^24.0.0",
     "@types/prompts": "^2.4.9",
     "typescript": "^5.8.2",

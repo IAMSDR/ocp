@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  mapToModelInfo,
   mapToModelV2,
   mapToStaticEntry,
   OPENAI_COMPATIBLE_NPM,
@@ -63,6 +64,49 @@ describe("mapToStaticEntry", () => {
   it("derives a release date from a created timestamp", () => {
     const entry = mapToStaticEntry({ id: "m", created: 1_700_000_000 });
     expect(entry.release_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+});
+
+describe("mapToModelInfo", () => {
+  it("maps a rich payload to the OpenCode V2 model shape", () => {
+    const entry = mapToModelInfo(raw, { providerID: "local9" });
+
+    expect(entry).toMatchObject({
+      id: "tt/deepseek-v4-flash-free",
+      modelID: "tt/deepseek-v4-flash-free",
+      providerID: "local9",
+      name: "tt/deepseek-v4-flash-free",
+      capabilities: {
+        tools: true,
+        input: ["text"],
+        output: ["text"],
+      },
+      variants: [],
+      time: { released: 0 },
+      cost: [
+        {
+          input: 0.14,
+          output: 0.28,
+          cache: { read: 0.0028, write: 0.14 },
+        },
+      ],
+      status: "active",
+      enabled: true,
+      limit: { context: 1000000, output: 384000 },
+    });
+  });
+
+  it("uses safe V2 defaults when metadata is absent", () => {
+    const entry = mapToModelInfo({ id: "m" }, { providerID: "p" });
+
+    expect(entry.capabilities).toEqual({ tools: false, input: ["text"], output: ["text"] });
+    expect(entry.cost).toEqual([]);
+    expect(entry.limit).toEqual({ context: 128000, output: 4096 });
+  });
+
+  it("converts release timestamps to milliseconds", () => {
+    const entry = mapToModelInfo({ id: "m", created: 1_700_000_000 }, { providerID: "p" });
+    expect(entry.time.released).toBe(1_700_000_000_000);
   });
 });
 
