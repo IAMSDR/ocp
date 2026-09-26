@@ -1,6 +1,6 @@
 {
   "name": "@iamsdr/ocp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Simple OpenCode plugin that connects any OpenAI-compatible /v1 endpoint and auto-loads its models.",
   "type": "module",
   "license": "MIT",

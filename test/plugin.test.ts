@@ -41,8 +41,10 @@ function fakeCtx() {
     remove: () => {},
     models: { set: () => {}, update: () => {}, remove: () => {} },
   };
+  let providerCallback: ((e: typeof editor) => void) | undefined;
   const provider = {
     transform: vi.fn(async (cb: (e: typeof editor) => void) => {
+      providerCallback = cb;
       cb(editor);
       return { dispose: async () => {} };
     }),
@@ -50,7 +52,28 @@ function fakeCtx() {
     list: vi.fn(async () => added),
     get: vi.fn(async () => undefined),
   };
-  return { ctx: { provider, options: {} } as never, added, provider };
+  const commands: Array<{ name: string; description?: string; execute: (input: never) => Promise<void> }> = [];
+  const command = {
+    transform: vi.fn(async (cb: (e: { add: (d: never) => void }) => void) => {
+      cb({ add: (d: never) => commands.push(d as never) });
+      return { dispose: async () => {} };
+    }),
+    reload: vi.fn(async () => {}),
+    list: vi.fn(async () => commands),
+  };
+  const model = {
+    reload: vi.fn(async () => {}),
+    list: vi.fn(async () => []),
+  };
+  const session = {
+    synthetic: vi.fn(async () => ({})),
+    prompt: vi.fn(async () => ({})),
+  };
+  const replayProviders = () => {
+    added.length = 0;
+    providerCallback?.(editor);
+  };
+  return { ctx: { provider, command, model, session, options: {} } as never, added, provider, commands, command, model, session, replayProviders };
 }
 
 function stubFetch(payload: unknown) {
@@ -126,13 +149,17 @@ describe("OcpPlugin V2", () => {
     expect(added.map((r) => r.info.id).sort()).toEqual(["a", "b"]);
   });
 
-  it("no-ops when the registry is empty", async () => {
+  it("registers providers and the ocp-reload command even when the registry is empty", async () => {
     vi.stubGlobal("fetch", stubFetch({ data: [] }));
     const { default: plugin } = await loadPlugin();
-    const { ctx, provider } = fakeCtx();
+    const { ctx, provider, added, commands, command } = fakeCtx();
     await plugin.setup(ctx);
-    // transform not called when no providers
-    expect(provider.transform).not.toHaveBeenCalled();
+    // Provider transform is always registered so a later /ocp-reload can add
+    // providers without a restart; it just adds nothing while empty.
+    expect(provider.transform).toHaveBeenCalledTimes(1);
+    expect(added.length).toBe(0);
+    expect(command.transform).toHaveBeenCalledTimes(1);
+    expect(commands.map((c) => c.name)).toContain("ocp-reload");
   });
 
   it("propagates headers and apiKey into provider settings", async () => {
@@ -149,5 +176,76 @@ describe("OcpPlugin V2", () => {
     await plugin.setup(ctx);
     expect(added[0]!.info.headers).toEqual({ "X-Tenant": "acme" });
     expect((added[0]!.info.settings as { apiKey: string }).apiKey).toBe("sk-123");
+  });
+
+  it("registers an ocp-reload slash command", async () => {
+    await seed({
+      p: { id: "p", name: "P", baseURL: "http://x/v1", enabled: true },
+    });
+    vi.stubGlobal("fetch", stubFetch({ data: [{ id: "m1" }] }));
+    const { default: plugin } = await loadPlugin();
+    const { ctx, commands, command } = fakeCtx();
+    await plugin.setup(ctx);
+    expect(command.transform).toHaveBeenCalledTimes(1);
+    expect(commands.map((c) => c.name)).toContain("ocp-reload");
+  });
+
+  it("reloads models without restart when /ocp-reload runs", async () => {
+    await seed({
+      p: { id: "p", name: "P", baseURL: "http://x/v1", enabled: true },
+    });
+    let payload: unknown = { data: [{ id: "m1" }] };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify(payload), { status: 200 })),
+    );
+    const { default: plugin } = await loadPlugin();
+    const { ctx, added, commands, provider, model, session, replayProviders } = fakeCtx();
+    await plugin.setup(ctx);
+    expect(added[0]!.models.map((m) => m.id)).toEqual(["m1"]);
+
+    // Upstream gains a model while OpenCode is still running.
+    payload = { data: [{ id: "m1" }, { id: "m2" }] };
+    const reload = commands.find((c) => c.name === "ocp-reload")!;
+    expect(reload).toBeDefined();
+    await reload.execute({ sessionID: "ses_test", prompt: { text: "" }, delivery: "steer" } as never);
+
+    expect(provider.reload).toHaveBeenCalledTimes(1);
+    expect(model.reload).toHaveBeenCalledTimes(1);
+    expect(session.synthetic).toHaveBeenCalledTimes(1);
+    expect(String((session.synthetic.mock.calls[0]![0] as { text: string }).text)).toContain("2 model(s)");
+
+    // Simulate OpenCode replaying provider transforms after reload().
+    replayProviders();
+    expect(added[0]!.models.map((m) => m.id).sort()).toEqual(["m1", "m2"]);
+  });
+
+  it("picks up a newly added provider from the registry on reload", async () => {
+    await seed({
+      a: { id: "a", name: "A", baseURL: "http://a/v1", enabled: true },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const id = String(url).includes("//b/") ? "mb" : "ma";
+        return new Response(JSON.stringify({ data: [{ id }] }), { status: 200 });
+      }),
+    );
+    const { default: plugin } = await loadPlugin();
+    const { ctx, added, commands, provider, replayProviders } = fakeCtx();
+    await plugin.setup(ctx);
+    expect(added.map((r) => r.info.id)).toEqual(["a"]);
+
+    // User runs ocp-setup (or edits ocp-providers.json) while OpenCode runs.
+    await seed({
+      a: { id: "a", name: "A", baseURL: "http://a/v1", enabled: true },
+      b: { id: "b", name: "B", baseURL: "http://b/v1", enabled: true },
+    });
+    const reload = commands.find((c) => c.name === "ocp-reload")!;
+    await reload.execute({ sessionID: "ses_test", prompt: { text: "" }, delivery: "steer" } as never);
+
+    expect(provider.reload).toHaveBeenCalledTimes(1);
+    replayProviders();
+    expect(added.map((r) => r.info.id).sort()).toEqual(["a", "b"]);
   });
 });
