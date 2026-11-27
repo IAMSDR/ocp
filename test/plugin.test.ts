@@ -30,7 +30,10 @@ async function seed(providers: Record<string, unknown>) {
 }
 
 function fakeCtx() {
-  const added: Array<{ info: { id: string; name: string; package: string; settings: Record<string, unknown>; headers?: Record<string, string> }; models: Array<{ id: string; modelID: string; providerID: string }> }> = [];
+  const added: Array<{
+    info: { id: string; name: string; package: string; settings: Record<string, unknown>; headers?: Record<string, string> };
+    models: Array<{ id: string; modelID: string; providerID: string; variants?: unknown[]; compatibility?: Record<string, unknown> }>;
+  }> = [];
   const editor = {
     list: () => added,
     get: (id: string) => added.find((r) => r.info.id === id),
@@ -247,5 +250,93 @@ describe("OcpPlugin V2", () => {
     expect(provider.reload).toHaveBeenCalledTimes(1);
     replayProviders();
     expect(added.map((r) => r.info.id).sort()).toEqual(["a", "b"]);
+  });
+
+  it("populates variants and compatibility on loaded models", async () => {
+    await seed({
+      ocp: { id: "ocp", name: "ocp", baseURL: "https://router.example/v1", enabled: true },
+    });
+    vi.stubGlobal(
+      "fetch",
+      stubFetch({
+        data: [
+          {
+            id: "ri/deepseek-ai/DeepSeek-V4.1-Flash-1017",
+            capabilities: { tools: true, reasoning: true, thinkingFormat: "deepseek" },
+            max_completion_tokens: 128000,
+            thinking_levels: ["none", "low", "medium", "high", "xhigh", "max"],
+          },
+        ],
+      }),
+    );
+    const { default: plugin } = await loadPlugin();
+    const { ctx, added } = fakeCtx();
+    await plugin.setup(ctx);
+
+    const m = added[0]!.models[0]!;
+    expect(m.variants).toEqual([
+      { id: "none", settings: { reasoningEffort: "none" } },
+      { id: "low", settings: { reasoningEffort: "low" } },
+      { id: "medium", settings: { reasoningEffort: "medium" } },
+      { id: "high", settings: { reasoningEffort: "high" } },
+      { id: "xhigh", settings: { reasoningEffort: "xhigh" } },
+      { id: "max", settings: { reasoningEffort: "max" } },
+    ]);
+    expect(m.compatibility).toEqual({ reasoningField: "reasoning_content" });
+  });
+
+  it("uses fresh disk cache on restart and bypasses cache on /ocp-reload", async () => {
+    await seed({
+      p: { id: "p", name: "P", baseURL: "http://x/v1", enabled: true },
+    });
+    let payload: unknown = { data: [{ id: "m1" }] };
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify(payload), { status: 200 }));
+    vi.stubGlobal("fetch", fetchImpl);
+
+    const { default: plugin1 } = await loadPlugin();
+    const first = fakeCtx();
+    await plugin1.setup(first.ctx);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    // Second startup within TTL should read cache without hitting fetch.
+    const { default: plugin2 } = await loadPlugin();
+    const second = fakeCtx();
+    await plugin2.setup(second.ctx);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(second.added[0]!.models.map((m) => m.id)).toEqual(["m1"]);
+
+    // /ocp-reload forces a fresh fetch and picks up new models.
+    payload = { data: [{ id: "m1" }, { id: "m2" }] };
+    const reload = second.commands.find((c) => c.name === "ocp-reload")!;
+    await reload.execute({ sessionID: "ses_test", prompt: { text: "" }, delivery: "steer" } as never);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    second.replayProviders();
+    expect(second.added[0]!.models.map((m) => m.id)).toEqual(["m1", "m2"]);
+  });
+
+  it("falls back to stale cache when upstream is unreachable on startup", async () => {
+    await seed({
+      p: { id: "p", name: "P", baseURL: "http://x/v1", enabled: true },
+    });
+    vi.stubGlobal("fetch", stubFetch({ data: [{ id: "cached-model" }] }));
+    const { default: plugin1 } = await loadPlugin();
+    await plugin1.setup(fakeCtx().ctx);
+
+    // Expire cache TTL and simulate network failure.
+    process.env.OCP_CACHE_TTL_MS = "0";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("ECONNREFUSED");
+      }),
+    );
+    try {
+      const { default: plugin2 } = await loadPlugin();
+      const second = fakeCtx();
+      await plugin2.setup(second.ctx);
+      expect(second.added[0]!.models.map((m) => m.id)).toEqual(["cached-model"]);
+    } finally {
+      delete process.env.OCP_CACHE_TTL_MS;
+    }
   });
 });

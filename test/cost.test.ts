@@ -55,4 +55,30 @@ describe("extractCost", () => {
     const cost = extractCost({ id: "free", pricing: { input: 0, output: 0 } });
     expect(cost).toEqual({ input: 0, output: 0, cache: { read: 0, write: 0 } });
   });
+
+  it("extracts reasoning pricing from per-million and per-token fields", () => {
+    expect(
+      extractCost({
+        id: "m",
+        pricing: { input: 1, output: 4, cached: 0.5, reasoning: 6, cache_creation: 1 },
+      }),
+    ).toEqual({
+      input: 1,
+      output: 4,
+      cache: { read: 0.5, write: 1 },
+      reasoning: 6,
+    });
+
+    expect(
+      extractCost({
+        id: "m",
+        pricing: { prompt: "1e-6", completion: "4e-6", internal_reasoning: "6e-6" },
+      }),
+    ).toEqual({
+      input: 1,
+      output: 4,
+      cache: { read: 0, write: 0 },
+      reasoning: 6,
+    });
+  });
 });

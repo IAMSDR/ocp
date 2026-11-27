@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_CONTEXT,
   DEFAULT_OUTPUT,
+  explicitTemperature,
   normalizeCapabilities,
+  normalizeCompatibility,
   normalizeLimits,
+  normalizeReasoning,
 } from "../dist/map/capabilities.js";
 
 describe("normalizeCapabilities", () => {
@@ -77,6 +80,120 @@ describe("normalizeLimits", () => {
     expect(normalizeLimits({ id: "m", context_length: 0, max_tokens: -5 })).toEqual({
       context: DEFAULT_CONTEXT,
       output: DEFAULT_OUTPUT,
+    });
+  });
+});
+
+describe("explicitTemperature", () => {
+  it("returns undefined when temperature is omitted", () => {
+    expect(explicitTemperature({ id: "m" })).toBeUndefined();
+  });
+
+  it("returns explicit boolean when set", () => {
+    expect(explicitTemperature({ id: "m", capabilities: { temperature: false } })).toBe(false);
+    expect(explicitTemperature({ id: "m", temperature: true })).toBe(true);
+  });
+});
+
+describe("normalizeReasoning", () => {
+  it("extracts toggle and effort levels from thinking_levels, stripping default", () => {
+    expect(
+      normalizeReasoning({
+        id: "ri/deepseek-ai/DeepSeek-V4.1-Flash-1017",
+        capabilities: { reasoning: true },
+        thinking_levels: ["low", "none", "default", "high", "low"],
+      }),
+    ).toEqual({
+      supported: true,
+      toggle: true,
+      effort: ["low", "high"],
+    });
+  });
+
+  it("does not invent none when thinking_levels omits it", () => {
+    expect(
+      normalizeReasoning({
+        id: "ag/claude-sonnet-5-5",
+        capabilities: { reasoning: true, thinkingCanDisable: true },
+        thinking_levels: ["low", "medium", "high", "max"],
+      }),
+    ).toEqual({
+      supported: true,
+      effort: ["low", "medium", "high", "max"],
+    });
+  });
+
+  it("falls back to default efforts when thinkingEffortSupported=true without thinking_levels", () => {
+    expect(
+      normalizeReasoning({
+        id: "m",
+        capabilities: { reasoning: true, thinkingEffortSupported: true, thinkingCanDisable: true },
+      }),
+    ).toEqual({
+      supported: true,
+      toggle: true,
+      effort: ["low", "medium", "high"],
+    });
+  });
+
+  it("returns supported: false when reasoning is false or absent", () => {
+    expect(normalizeReasoning({ id: "m" })).toEqual({ supported: false });
+    expect(
+      normalizeReasoning({
+        id: "m",
+        capabilities: { reasoning: false },
+        thinking_levels: ["low", "high"],
+      }),
+    ).toEqual({ supported: false });
+  });
+});
+
+describe("normalizeCompatibility", () => {
+  it("maps deepseek/zai/kimi thinkingFormat to reasoningField=reasoning_content", () => {
+    expect(
+      normalizeCompatibility({
+        id: "sh/glm-5.3",
+        max_completion_tokens: 128000,
+        capabilities: { thinkingFormat: "zai" },
+      }),
+    ).toEqual({ reasoningField: "reasoning_content" });
+  });
+
+  it("does not force reasoningField for claude/openai/gemini formats", () => {
+    expect(
+      normalizeCompatibility({
+        id: "sh/claude-sonnet-5",
+        max_completion_tokens: 128000,
+        capabilities: { thinkingFormat: "claude-adaptive" },
+      }),
+    ).toBeUndefined();
+  });
+
+  it("sets maxTokensField=max_tokens when only max_tokens is exposed", () => {
+    expect(
+      normalizeCompatibility({
+        id: "m",
+        max_tokens: 8192,
+      }),
+    ).toEqual({ maxTokensField: "max_tokens" });
+  });
+
+  it("preserves explicit compatibility overrides", () => {
+    expect(
+      normalizeCompatibility({
+        id: "m",
+        compatibility: {
+          reasoningField: "reasoning",
+          requireReasoning: true,
+          maxTokensField: "max_completion_tokens",
+          supportsPromptCacheKey: true,
+        },
+      }),
+    ).toEqual({
+      reasoningField: "reasoning",
+      requireReasoning: true,
+      maxTokensField: "max_completion_tokens",
+      supportsPromptCacheKey: true,
     });
   });
 });

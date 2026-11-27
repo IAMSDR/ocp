@@ -27,6 +27,21 @@ export interface NormalizedLimits {
   output: number;
 }
 
+export interface NormalizedReasoning {
+  supported: boolean;
+  toggle?: boolean;
+  effort?: string[];
+}
+
+export interface NormalizedCompatibility {
+  reasoningField?: string;
+  requireReasoning?: boolean;
+  maxTokensField?: "max_completion_tokens" | "max_tokens";
+  requireFinishReason?: boolean;
+  requireAssistantAfterTool?: boolean;
+  supportsPromptCacheKey?: boolean;
+}
+
 export const DEFAULT_CONTEXT = 128_000;
 export const DEFAULT_OUTPUT = 4_096;
 
@@ -138,4 +153,142 @@ export function normalizeLimits(raw: RawModel): NormalizedLimits {
       limit.output,
     ) ?? DEFAULT_OUTPUT;
   return { context, output };
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim().length > 0) return value.trim();
+  }
+  return undefined;
+}
+
+function stringList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") continue;
+    const trimmed = item.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+/**
+ * Return the explicit temperature support flag when the upstream payload sets
+ * one, or `undefined` when unknown/omitted.
+ */
+export function explicitTemperature(raw: RawModel): boolean | undefined {
+  const caps = asRecord(raw.capabilities);
+  const limits = asRecord(raw.limit);
+  return firstBoolean(caps.temperature, raw.temperature, limits.temperature);
+}
+
+const DEFAULT_EFFORTS = ["low", "medium", "high"];
+const REASONING_CONTENT_FORMATS = new Set(["deepseek", "zai", "kimi"]);
+
+/**
+ * Normalize reasoning/thinking levels into OpenCode's models.dev v2 shape
+ * (`{ supported, toggle?, effort? }`), reading `thinking_levels` when
+ * exposed by the gateway and falling back to effort-supported flags.
+ */
+export function normalizeReasoning(raw: RawModel): NormalizedReasoning {
+  const caps = asRecord(raw.capabilities);
+  const explicit = firstBoolean(caps.reasoning, caps.thinking, raw.reasoning, raw.thinking);
+  if (explicit === false) return { supported: false };
+
+  const rawLevels =
+    stringList(raw.thinking_levels) ??
+    stringList(caps.thinking_levels) ??
+    stringList(raw.thinkingLevels) ??
+    stringList(caps.thinkingLevels);
+
+  const supported = explicit === true || (rawLevels !== undefined && rawLevels.length > 0);
+  if (!supported) return { supported: false };
+
+  if (rawLevels && rawLevels.length > 0) {
+    const filtered = rawLevels.filter((level) => level !== "default");
+    const hasNone = filtered.includes("none");
+    const effort = filtered.filter((level) => level !== "none");
+    return {
+      supported: true,
+      ...(hasNone ? { toggle: true } : {}),
+      ...(effort.length > 0 ? { effort } : {}),
+    };
+  }
+
+  const effortSupported = firstBoolean(caps.thinkingEffortSupported, raw.thinkingEffortSupported);
+  const supportedParams = stringList(raw.supported_parameters);
+  const hasReasoningParam = supportedParams?.includes("reasoning") ?? false;
+  const canDisable = firstBoolean(caps.thinkingCanDisable, raw.thinkingCanDisable);
+
+  if (effortSupported === true || hasReasoningParam) {
+    return {
+      supported: true,
+      ...(canDisable === true ? { toggle: true } : {}),
+      effort: [...DEFAULT_EFFORTS],
+    };
+  }
+
+  return { supported: true };
+}
+
+/**
+ * Extract OpenAI-compatible protocol compatibility hints from explicit model
+ * metadata and gateway capabilities (such as `thinkingFormat`).
+ */
+export function normalizeCompatibility(raw: RawModel): NormalizedCompatibility | undefined {
+  const caps = asRecord(raw.capabilities);
+  const compat = asRecord(raw.compatibility);
+
+  let reasoningField = firstString(
+    compat.reasoningField,
+    compat.reasoning_field,
+    caps.reasoningField,
+    raw.reasoning_field,
+  );
+  const requireReasoning = firstBoolean(compat.requireReasoning, compat.require_reasoning);
+  const rawMaxTokens = firstString(compat.maxTokensField, compat.max_tokens_field);
+  let maxTokensField: "max_completion_tokens" | "max_tokens" | undefined =
+    rawMaxTokens === "max_completion_tokens" || rawMaxTokens === "max_tokens"
+      ? rawMaxTokens
+      : undefined;
+  const requireFinishReason = firstBoolean(compat.requireFinishReason, compat.require_finish_reason);
+  const requireAssistantAfterTool = firstBoolean(
+    compat.requireAssistantAfterTool,
+    compat.require_assistant_after_tool,
+  );
+  const supportsPromptCacheKey = firstBoolean(
+    compat.supportsPromptCacheKey,
+    compat.supports_prompt_cache_key,
+  );
+
+  const thinkingFormat = firstString(caps.thinkingFormat, raw.thinkingFormat)?.toLowerCase();
+  if (!reasoningField && thinkingFormat && REASONING_CONTENT_FORMATS.has(thinkingFormat)) {
+    reasoningField = "reasoning_content";
+  }
+
+  if (!maxTokensField) {
+    const hasMaxCompletion = firstPositiveNumber(raw.max_completion_tokens) !== undefined;
+    const hasMaxTokensOnly = !hasMaxCompletion && firstPositiveNumber(raw.max_tokens) !== undefined;
+    if (
+      hasMaxTokensOnly ||
+      (!hasMaxCompletion && thinkingFormat && REASONING_CONTENT_FORMATS.has(thinkingFormat))
+    ) {
+      maxTokensField = "max_tokens";
+    }
+  }
+
+  const out: NormalizedCompatibility = {
+    ...(reasoningField !== undefined ? { reasoningField } : {}),
+    ...(requireReasoning !== undefined ? { requireReasoning } : {}),
+    ...(maxTokensField !== undefined ? { maxTokensField } : {}),
+    ...(requireFinishReason !== undefined ? { requireFinishReason } : {}),
+    ...(requireAssistantAfterTool !== undefined ? { requireAssistantAfterTool } : {}),
+    ...(supportsPromptCacheKey !== undefined ? { supportsPromptCacheKey } : {}),
+  };
+
+  return Object.keys(out).length > 0 ? out : undefined;
 }

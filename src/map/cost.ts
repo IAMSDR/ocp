@@ -5,6 +5,7 @@ export interface NormalizedCost {
   input: number;
   output: number;
   cache: { read: number; write: number };
+  reasoning?: number;
 }
 
 function num(value: unknown): number | undefined {
@@ -70,13 +71,25 @@ export function extractCost(raw: RawModel): NormalizedCost | undefined {
     costCache.write,
     scale(pricing.input_cache_write, PER_TOKEN),
   );
+  const reasoning = firstNum(
+    pricing.reasoning,
+    cost.reasoning,
+    scale(pricing.internal_reasoning, PER_TOKEN),
+  );
 
-  if (input === undefined && output === undefined && cacheRead === undefined && cacheWrite === undefined) {
+  if (
+    input === undefined &&
+    output === undefined &&
+    cacheRead === undefined &&
+    cacheWrite === undefined &&
+    reasoning === undefined
+  ) {
     return undefined;
   }
   return {
     input: input ?? 0,
     output: output ?? 0,
     cache: { read: cacheRead ?? 0, write: cacheWrite ?? 0 },
+    ...(reasoning !== undefined ? { reasoning } : {}),
   };
 }

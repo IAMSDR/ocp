@@ -20,3 +20,7 @@ export function registryPath(): string {
 export function authJsonPath(): string {
   return path.join(opencodeDataDir(), "auth.json");
 }
+
+export function modelsCachePath(): string {
+  return path.join(opencodeDataDir(), "ocp-models-cache.json");
+}

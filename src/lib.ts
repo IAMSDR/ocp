@@ -13,5 +13,6 @@ export * from "./map/capabilities.js";
 export * from "./map/cost.js";
 export * from "./map/filters.js";
 export * from "./catalog.js";
+export * from "./cache.js";
 export { createLogger, defaultLogger } from "./log.js";
 export type { Logger, LogLevel } from "./log.js";

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildVariants,
   mapToModelInfo,
   mapToModelV2,
   mapToStaticEntry,
@@ -107,6 +108,80 @@ describe("mapToModelInfo", () => {
   it("converts release timestamps to milliseconds", () => {
     const entry = mapToModelInfo({ id: "m", created: 1_700_000_000 }, { providerID: "p" });
     expect(entry.time.released).toBe(1_700_000_000_000);
+  });
+
+  it("maps thinking_levels into ordered variants with none first and reasoningEffort settings", () => {
+    const entry = mapToModelInfo(
+      {
+        id: "ri/deepseek-ai/DeepSeek-V4.1-Flash-1017",
+        capabilities: {
+          tools: true,
+          reasoning: true,
+          thinkingFormat: "deepseek",
+          thinkingCanDisable: true,
+          thinkingEffortSupported: true,
+          temperature: false,
+          contextWindow: 1000000,
+          maxOutput: 128000,
+        },
+        max_completion_tokens: 128000,
+        thinking_levels: ["low", "medium", "none", "high", "xhigh", "max"],
+      },
+      { providerID: "ocp" },
+    );
+
+    expect(entry.variants).toEqual([
+      { id: "none", settings: { reasoningEffort: "none" } },
+      { id: "low", settings: { reasoningEffort: "low" } },
+      { id: "medium", settings: { reasoningEffort: "medium" } },
+      { id: "high", settings: { reasoningEffort: "high" } },
+      { id: "xhigh", settings: { reasoningEffort: "xhigh" } },
+      { id: "max", settings: { reasoningEffort: "max" } },
+    ]);
+    expect(entry.compatibility).toEqual({ reasoningField: "reasoning_content" });
+    expect((entry.capabilities as { temperature?: boolean }).temperature).toBe(false);
+  });
+
+  it("builds no variants for non-reasoning models", () => {
+    const entry = mapToModelInfo(
+      {
+        id: "sh/hy4-preview",
+        capabilities: { reasoning: false, tools: true },
+        thinking_levels: ["low", "high"],
+      },
+      { providerID: "ocp" },
+    );
+    expect(entry.variants).toEqual([]);
+  });
+
+  it("preserves tiered context pricing arrays when provided", () => {
+    const entry = mapToModelInfo(
+      {
+        id: "m",
+        cost: [
+          { input: 1, output: 2, cache: { read: 0.1, write: 0.2 } },
+          { tier: { type: "context", size: 200000 }, input: 2, output: 4, cache: { read: 0.2, write: 0.4 } },
+        ],
+      },
+      { providerID: "ocp" },
+    );
+    expect(entry.cost).toEqual([
+      { input: 1, output: 2, cache: { read: 0.1, write: 0.2 } },
+      { tier: { type: "context", size: 200000 }, input: 2, output: 4, cache: { read: 0.2, write: 0.4 } },
+    ]);
+  });
+});
+
+describe("buildVariants", () => {
+  it("returns empty array when unsupported and deduplicates levels", () => {
+    expect(buildVariants({ supported: false })).toEqual([]);
+    expect(
+      buildVariants({ supported: true, toggle: true, effort: ["low", "none", "high", "low"] }),
+    ).toEqual([
+      { id: "none", settings: { reasoningEffort: "none" } },
+      { id: "low", settings: { reasoningEffort: "low" } },
+      { id: "high", settings: { reasoningEffort: "high" } },
+    ]);
   });
 });
 

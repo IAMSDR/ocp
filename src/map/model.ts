@@ -1,7 +1,16 @@
 import { Model, Provider } from "@opencode/plugin";
 
 import type { RawModel } from "../fetch/models.js";
-import { normalizeCapabilities, normalizeLimits, type NormalizedCapabilities, type NormalizedLimits } from "./capabilities.js";
+import {
+  explicitTemperature,
+  normalizeCapabilities,
+  normalizeCompatibility,
+  normalizeLimits,
+  normalizeReasoning,
+  type NormalizedCapabilities,
+  type NormalizedLimits,
+  type NormalizedReasoning,
+} from "./capabilities.js";
 import { extractCost, type NormalizedCost } from "./cost.js";
 import { asRecord } from "./util.js";
 
@@ -144,19 +153,67 @@ export function mapToModelV2(raw: RawModel, ctx: { providerID: string; baseURL: 
 }
 
 /**
+ * Build OpenCode V2 `Model.Variant[]` from normalized reasoning controls.
+ *
+ * Mirrors OpenCode's own `Variant.resolve` ordering: `"none"` toggle first
+ * (if present), followed by effort levels in gateway order, deduplicated.
+ * For `@opencode/ai/providers/openai-compatible`, each variant carries
+ * `settings: { reasoningEffort: id }` so `"none"` disables reasoning and each
+ * effort level passes `reasoning_effort` through to the upstream gateway.
+ */
+export function buildVariants(reasoning: NormalizedReasoning): Model.Variant[] {
+  if (!reasoning.supported) return [];
+  const ids: string[] = [];
+  if (reasoning.toggle) ids.push("none");
+  for (const level of reasoning.effort ?? []) {
+    if (!ids.includes(level)) ids.push(level);
+  }
+  return ids.map((id) => ({
+    id: Model.VariantID.make(id),
+    settings: { reasoningEffort: id },
+  }));
+}
+
+function normalizeTieredCost(rawCost: unknown): Model.Info["cost"] | undefined {
+  if (!Array.isArray(rawCost) || rawCost.length === 0) return undefined;
+  const out: Array<Record<string, unknown>> = [];
+  for (const item of rawCost) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const normalized = extractCost({ id: "tier", cost: item });
+    if (!normalized) continue;
+    const rec = item as Record<string, unknown>;
+    const tierRec = asRecord(rec.tier);
+    const tier =
+      tierRec.type === "context" && typeof tierRec.size === "number" && Number.isFinite(tierRec.size)
+        ? { type: "context" as const, size: Math.floor(tierRec.size) }
+        : undefined;
+    out.push({
+      ...(tier ? { tier } : {}),
+      input: normalized.input,
+      output: normalized.output,
+      cache: { read: normalized.cache.read, write: normalized.cache.write },
+    });
+  }
+  return out.length > 0 ? (out as unknown as Model.Info["cost"]) : undefined;
+}
+
+/**
  * Map a raw `/v1/models` entry to the V2 `Model.Info` shape used by
  * `ctx.provider.transform` (opencode >=2.0).
  *
  * Keeps the same capability/limit/cost heuristics as the legacy mappers
- * but emits the flat `capabilities: { tools, input, output }` and
- * array-cost shape required by `@opencode/schema`.
+ * while emitting `capabilities`, `variants`, `compatibility`, and array `cost`
+ * matching `@opencode/schema`.
  */
 export function mapToModelInfo(
   raw: RawModel,
-  ctx: { providerID: string },
+  ctx: { providerID: string; package?: string },
 ): Model.Info {
   const caps = normalizeCapabilities(raw);
   const limits = normalizeLimits(raw);
+  const reasoning = normalizeReasoning(raw);
+  const compatibility = normalizeCompatibility(raw);
+  const temp = explicitTemperature(raw);
   const cost = extractCost(raw);
   const name = displayName(raw);
   const providerID = Provider.ID.make(ctx.providerID);
@@ -188,24 +245,30 @@ export function mapToModelInfo(
     if (Number.isFinite(parsed)) released = parsed;
   }
 
-  const costArray = cost
-    ? [
-        {
-          input: cost.input,
-          output: cost.output,
-          cache: { read: cost.cache.read ?? 0, write: cost.cache.write ?? 0 },
-        },
-      ]
-    : [];
+  const tieredCost = normalizeTieredCost(raw.cost);
+  const costArray =
+    tieredCost ??
+    (cost
+      ? [
+          {
+            input: cost.input,
+            output: cost.output,
+            cache: { read: cost.cache.read ?? 0, write: cost.cache.write ?? 0 },
+          },
+        ]
+      : []);
 
   return {
     ...Model.Info.default(providerID, modelID),
     name,
     ...(typeof raw.family === "string" ? { family: Model.Family.make(raw.family) } : {}),
+    ...(ctx.package ? { package: ctx.package } : {}),
+    ...(compatibility ? { compatibility } : {}),
     capabilities: {
       tools: caps.toolcall,
       input,
       output,
+      ...(temp !== undefined ? { temperature: temp } : {}),
     },
     limit: {
       context: limits.context,
@@ -214,7 +277,7 @@ export function mapToModelInfo(
     cost: costArray,
     status: "active",
     enabled: true,
-    variants: [],
+    variants: buildVariants(reasoning),
     time: { released },
   } as unknown as Model.Info;
 }

@@ -1,7 +1,16 @@
 import { Model, Plugin, Provider } from "@opencode/plugin";
+import {
+  emptyModelsCache,
+  getCachedEntry,
+  isCacheFresh,
+  readModelsCache,
+  resolveCacheTtlMs,
+  writeModelsCache,
+  type ModelsCache,
+} from "./cache.js";
 import { readAuthJson, readApiKey } from "./config/auth.js";
 import { readRegistry, type ProviderEntry } from "./config/registry.js";
-import { fetchModels, type RawModel } from "./fetch/models.js";
+import { fetchModels, stripTrailingSlashes, type RawModel } from "./fetch/models.js";
 import { filterModels } from "./map/filters.js";
 import { mapToModelInfo, OPENAI_COMPATIBLE_PACKAGE_V2 } from "./map/model.js";
 import { defaultLogger, type Logger } from "./log.js";
@@ -14,11 +23,28 @@ interface LoadedProvider {
   models: RawModel[];
 }
 
+interface LoadProviderOptions {
+  forceRefresh?: boolean;
+  cache?: ModelsCache;
+  now?: number;
+  ttlMs?: number;
+}
+
 async function loadProvider(
   entry: ProviderEntry,
   apiKey: string | undefined,
   logger: Logger,
-): Promise<LoadedProvider | undefined> {
+  opts: LoadProviderOptions = {},
+): Promise<{ loaded?: LoadedProvider; cacheUpdated?: { id: string; baseURL: string; models: RawModel[] } }> {
+  const cached = opts.cache ? getCachedEntry(opts.cache, entry.id, entry.baseURL) : undefined;
+  if (!opts.forceRefresh && cached && isCacheFresh(cached, opts.now, opts.ttlMs)) {
+    const filtered = dedupeModels(filterModels(cached.models, entry.models));
+    logger.info(`loaded ${filtered.length} cached model(s) from "${entry.id}"`, {
+      baseURL: cached.baseURL,
+    });
+    return { loaded: { entry, apiKey, baseURL: cached.baseURL, models: filtered } };
+  }
+
   try {
     const result = await fetchModels(entry.baseURL, {
       apiKey,
@@ -28,24 +54,68 @@ async function loadProvider(
     logger.info(`loaded ${filtered.length} model(s) from "${entry.id}"`, {
       baseURL: result.baseURL,
     });
-    return { entry, apiKey, baseURL: result.baseURL, models: filtered };
+    return {
+      loaded: { entry, apiKey, baseURL: result.baseURL, models: filtered },
+      cacheUpdated: { id: entry.id, baseURL: result.baseURL, models: result.models },
+    };
   } catch (err) {
-    logger.warn(`skipping provider "${entry.id}": ${err instanceof Error ? err.message : String(err)}`);
-    return undefined;
+    const reason = err instanceof Error ? err.message : String(err);
+    if (cached && cached.models.length > 0) {
+      const filtered = dedupeModels(filterModels(cached.models, entry.models));
+      logger.warn(`using cached catalog for "${entry.id}" after fetch failure: ${reason}`);
+      return { loaded: { entry, apiKey, baseURL: cached.baseURL, models: filtered } };
+    }
+    logger.warn(`skipping provider "${entry.id}": ${reason}`);
+    return {};
   }
 }
 
-async function loadAll(registry: Awaited<ReturnType<typeof readRegistry>>, logger: Logger) {
+async function loadAll(
+  registry: Awaited<ReturnType<typeof readRegistry>>,
+  logger: Logger,
+  opts: { forceRefresh?: boolean } = {},
+): Promise<LoadedProvider[]> {
   const auth = await readAuthJson();
   const enabled = Object.values(registry.providers).filter((p) => p.enabled);
-  const loaded = await Promise.all(
+  const cache = await readModelsCache().catch(() => emptyModelsCache());
+  const now = Date.now();
+  const ttlMs = resolveCacheTtlMs();
+
+  const results = await Promise.all(
     enabled.map((entry) => {
       const ref = entry.apiKeyRef ?? entry.id;
       const apiKey = readApiKey(auth, ref);
-      return loadProvider(entry, apiKey, logger);
+      return loadProvider(entry, apiKey, logger, {
+        forceRefresh: opts.forceRefresh,
+        cache,
+        now,
+        ttlMs,
+      });
     }),
   );
-  return loaded.filter((p): p is LoadedProvider => p !== undefined);
+
+  let dirty = false;
+  for (const res of results) {
+    if (!res.cacheUpdated) continue;
+    const entry = enabled.find((p) => p.id === res.cacheUpdated!.id);
+    if (!entry) continue;
+    cache.entries[res.cacheUpdated.id] = {
+      configBaseURL: stripTrailingSlashes(entry.baseURL),
+      baseURL: res.cacheUpdated.baseURL,
+      fetchedAt: now,
+      models: res.cacheUpdated.models,
+    };
+    dirty = true;
+  }
+  if (dirty) {
+    await writeModelsCache(cache).catch((err) => {
+      logger.warn(`failed to write model cache: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  }
+
+  return results
+    .map((r) => r.loaded)
+    .filter((p): p is LoadedProvider => p !== undefined);
 }
 
 export const OCP_RELOAD_COMMAND = "ocp-reload";
@@ -54,7 +124,12 @@ function applyLoadedProvider(
   editor: { add: (input: { info: Provider.Info; models: readonly Model.Info[] }) => void },
   provider: LoadedProvider,
 ) {
-  const models = provider.models.map((raw) => mapToModelInfo(raw, { providerID: provider.entry.id }));
+  const models = provider.models.map((raw) =>
+    mapToModelInfo(raw, {
+      providerID: provider.entry.id,
+      package: OPENAI_COMPATIBLE_PACKAGE_V2,
+    }),
+  );
   const providerID = Provider.ID.make(provider.entry.id);
   const headers = provider.entry.headers;
   const info: Provider.Info = {
@@ -105,7 +180,7 @@ export default Plugin.define({
         execute: async ({ sessionID }) => {
           try {
             const registry = await readRegistry();
-            const fresh = await loadAll(registry, logger);
+            const fresh = await loadAll(registry, logger, { forceRefresh: true });
             source.loaded = fresh;
             await ctx.provider.reload();
             try {
